@@ -1,0 +1,9 @@
+(S (CC but)
+  (, ,)
+  (NP (PRP it))
+  (VP (VBZ 's)
+    (ADVP (RBS most) (RB certainly))
+    (RB not)
+    (ADJP (JJ saturday-night-friendly) (RB fare)))
+  )
+
