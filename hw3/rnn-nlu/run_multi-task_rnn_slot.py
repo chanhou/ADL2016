@@ -233,12 +233,12 @@ def create_model(session, source_vocab_size, target_vocab_size, label_vocab_size
           bidirectional_rnn=FLAGS.bidirectional_rnn,
           task=task)
 
-  #ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
-  ckpt = FLAGS.train_dir+'/model.ckpt-8700'
-  print(ckpt)
-  #if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path):
-    #print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-  model_train.saver.restore(session, ckpt)
+  ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
+  #ckpt = FLAGS.train_dir+'/model.ckpt-8700'
+  #print(ckpt)
+  if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path):
+    print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
+  model_train.saver.restore(session, ckpt.model_checkpoint_path)
   #else:
   #  print("Created model with fresh parameters.")
   #  session.run(tf.initialize_all_variables())
@@ -394,7 +394,7 @@ def train():
         #  subprocess.call(['mv', current_taging_valid_out_file, current_taging_valid_out_file + '.best_f1_%.2f' % best_valid_score])
         
         # test, run test after each validation for development purpose.
-        #_, _, intent_list, tagging_list = run_valid_test(test_set, 'Test')
+        _, _, intent_list, tagging_list = run_valid_test(test_set, 'Test')
         #with open(FLAGS.output,'w')as w:
         #    for intt in intent_list:
         #        w.write(intt+'\n')

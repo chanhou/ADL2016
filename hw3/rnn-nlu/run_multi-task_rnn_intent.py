@@ -233,12 +233,12 @@ def create_model(session, source_vocab_size, target_vocab_size, label_vocab_size
           bidirectional_rnn=FLAGS.bidirectional_rnn,
           task=task)
 
-  #ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
-  ckpt = FLAGS.train_dir+'/model.ckpt-8700'
-  print(ckpt)
-  #if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path):
-    #print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-  model_train.saver.restore(session, ckpt)
+  ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
+  #ckpt = FLAGS.train_dir+'/model.ckpt-4200'
+  #print(ckpt)
+  if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path):
+    print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
+  model_train.saver.restore(session, ckpt.model_checkpoint_path)
   #else:
   #  print("Created model with fresh parameters.")
   #  session.run(tf.initialize_all_variables())
