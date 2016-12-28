@@ -1,217 +1,242 @@
-"""
-### NOTICE ###
-
-You need to upload this file.
-You can add any function you want in this file.
-
-"""
-
-import tensorflow as tf
-import math
+import os
+import time
+import random
 import numpy as np
+#from tqdm import tqdm
+import tensorflow as tf
 import cv2
 
-import scipy.ndimage as ndimage
+from base import BaseModel
+from history import History
+from replay_memory import ReplayMemory
+from ops import linear, conv2d, clipped_error
+from utils import get_time, save_pkl, load_pkl
 
-gamma = .99
+from config import get_config
 
-class GradientClippingOptimizer(tf.train.Optimizer):
-    def __init__(self, optimizer, use_locking=False, name="GradientClipper"):
-        super(GradientClippingOptimizer, self).__init__(use_locking, name)
-        self.optimizer = optimizer
+flags = tf.app.flags
+FLAGS = flags.FLAGS
 
-    def compute_gradients(self, *args, **kwargs):
-        grads_and_vars = self.optimizer.compute_gradients(*args, **kwargs)
-        clipped_grads_and_vars = []
-        for (grad, var) in grads_and_vars:
-            if grad is not None:
-                clipped_grads_and_vars.append((tf.clip_by_value(grad, -1, 1), var))
-            else:
-                clipped_grads_and_vars.append((grad, var))
-        return clipped_grads_and_vars
+class Agent(BaseModel):
+  def __init__(self, sess, min_action_set):
 
-    def apply_gradients(self, *args, **kwargs):
-        return self.optimizer.apply_gradients(*args, **kwargs)
+    self.config = get_config()
+    super(Agent, self).__init__(self.config)
+    self.sess = sess
+    self.min_action_set = min_action_set
+
+    self.env_action_size = len(self.min_action_set)
+    self.checkStart = True
+
+    self.weight_dir = 'weights'
+    #self.env = environment
+    self.test_history = History(self.config)
+    # self.history = History(self.config)
+    self.memory = ReplayMemory(self.config, self.model_dir)
+
+    with tf.variable_scope('step'):
+      self.step_op = tf.Variable(0, trainable=False, name='step')
+      self.step_input = tf.placeholder('int32', None, name='step_input')
+      self.step_assign_op = self.step_op.assign(self.step_input)
+
+    self.build_dqn()
 
 
-
-class Agent(object):
-    def __init__(self, sess, min_action_set):
-        self.sess = sess
-        self.min_action_set = min_action_set
-        self.build_dqn()
-
-    def build_dqn(self):
-        """
-        # TODO
-            You need to build your DQN here.
-            And load the pre-trained model named as './best_model.ckpt'.
-            For example, 
-                saver.restore(self.sess, './best_model.ckpt')
-        """
-        self.numActions = len(self.min_action_set)
-        self.normalizeWeights = True
-        self.learning_rate = 0.00025
-        self._count = -1
-        self.screens = []
-        
-        self.x, self.y = self.buildNetwork('policy', True, self.numActions)
-        self.x_target, self.y_target = self.buildNetwork('target', False, self.numActions)
-        
-        # build the variable copy ops
-        self.update_target = []
-        trainable_variables = tf.trainable_variables()
-        all_variables = tf.all_variables()
-        for i in range(0, len(trainable_variables)):
-			self.update_target.append(all_variables[len(trainable_variables) + i].assign(trainable_variables[i]))
-
-        self.a = tf.placeholder(tf.float32, shape=[None, self.numActions])
-        print('a %s' % (self.a.get_shape()))
-        self.y_ = tf.placeholder(tf.float32, [None])
-        print('y_ %s' % (self.y_.get_shape()))
-
-        self.y_a = tf.reduce_sum(tf.mul(self.y, self.a), reduction_indices=1)
-        print('y_a %s' % (self.y_a.get_shape()))
-
-        difference = tf.abs(self.y_a - self.y_)
-        quadratic_part = tf.clip_by_value(difference, 0.0, 1.0)
-        linear_part = difference - quadratic_part
-        errors = (0.5 * tf.square(quadratic_part)) + linear_part
-        self.loss = tf.reduce_sum(errors)
-
-        optimizer = tf.train.RMSPropOptimizer(self.learning_rate, decay=.95, epsilon=.01)
-        self.train_step = optimizer.minimize(self.loss)
-
-        self.saver = tf.train.Saver(max_to_keep=25)
-
-        # Initialize variables
-        self.sess.run(tf.initialize_all_variables())
-        self.sess.run(self.update_target) # is this necessary?
-
-        #self.summary_writer = tf.train.SummaryWriter(self.baseDir + '/tensorboard', self.sess.graph_def)
-        
-        self.model = './best_model.ckpt'
-        print('Loading from model file %s' % (self.model))
-        self.saver.restore(self.sess, self.model)
-
-    def getSetting(self):
-        """
+  def getSetting(self):
+    """
         # TODO
             You can only modify these three parameters.
             Adding any other parameters are not allowed.
             1. action_repeat: number of time for repeating the same action 
             2. random_init_step: number of randomly initial steps
             3. screen_type: return 0 for RGB; return 1 for GrayScale
-        """
-        action_repeat = 4
-        random_init_step = 1
-        screen_type = 0
-        return action_repeat, random_init_step, screen_type
+    """
+    action_repeat = 4
+    screen_type = 0
+    return action_repeat, screen_type
 
-    def play(self, screen):
-        """
-        # TODO
-            The "action" is your DQN argmax ouput.
-            The "min_action_set" is used to transform DQN argmax ouput into real action number.
-            For example,
-                 DQN output = [0.1, 0.2, 0.1, 0.6]
-                 argmax = 3
-                 min_action_set = [0, 1, 3, 4]
-                 real action number = 4
-        """
-        # action = 0 # you can remove this line
-        #screen = cv2.resize(cv2.cvtColor(screen, cv2.COLOR_RGB2GRAY), (84,84))
-        #screen.resize((84,84,1)) 
+  def predict(self, s_t, test_ep=None):
 
-        screen = self.stateByAddingScreen(screen)
-        screen = np.concatenate(screen, axis=2)
-        action = self.inference(screen)
-        
-        return self.min_action_set[action]
+    action = self.q_action.eval({self.s_t: [s_t]})[0]
+
+    return action
 
 
-    def inference(self, screens):
-        #screens = np.concatenate(screens, axis=2) 
-        screens = np.reshape(screens, (1, 84, 84, 4))
-        y = self.sess.run([self.y], {self.x: screens})
-        q_values = np.squeeze(y)
-        #print(q_values)
-        return np.argmax(q_values)
+  def build_dqn(self):
+    self.w = {}
+    self.t_w = {}
 
-    def stateByAddingScreen(self, screen):
-        screen = np.dot(screen, np.array([.299, .587, .114])).astype(np.uint8)
-        screen = ndimage.zoom(screen, (0.4, 0.525))
-        screen.resize((84, 84, 1))
-        
-        if len(self.screens)!=0:
-            self.screens = self.screens[:3]
-            self.screens.insert(0, screen)
-        else:
-            self.screens = [screen, screen, screen, screen]
-        return self.screens
+    #initializer = tf.contrib.layers.xavier_initializer()
+    initializer = tf.truncated_normal_initializer(0, 0.02)
+    activation_fn = tf.nn.relu
+
+    # training network
+    with tf.variable_scope('prediction'):
+      if self.cnn_format == 'NHWC':
+        self.s_t = tf.placeholder('float32',
+            [None, self.screen_height, self.screen_width, self.history_length], name='s_t')
+      else:
+        self.s_t = tf.placeholder('float32',
+            [None, self.history_length, self.screen_height, self.screen_width], name='s_t')
+
+      self.l1, self.w['l1_w'], self.w['l1_b'] = conv2d(self.s_t,
+          32, [8, 8], [4, 4], initializer, activation_fn, self.cnn_format, name='l1')
+      self.l2, self.w['l2_w'], self.w['l2_b'] = conv2d(self.l1,
+          64, [4, 4], [2, 2], initializer, activation_fn, self.cnn_format, name='l2')
+      self.l3, self.w['l3_w'], self.w['l3_b'] = conv2d(self.l2,
+          64, [3, 3], [1, 1], initializer, activation_fn, self.cnn_format, name='l3')
+
+      shape = self.l3.get_shape().as_list()
+      self.l3_flat = tf.reshape(self.l3, [-1, reduce(lambda x, y: x * y, shape[1:])])
+
+      if self.dueling:
+        self.value_hid, self.w['l4_val_w'], self.w['l4_val_b'] = \
+            linear(self.l3_flat, 512, activation_fn=activation_fn, name='value_hid')
+
+        self.adv_hid, self.w['l4_adv_w'], self.w['l4_adv_b'] = \
+            linear(self.l3_flat, 512, activation_fn=activation_fn, name='adv_hid')
+
+        self.value, self.w['val_w_out'], self.w['val_w_b'] = \
+          linear(self.value_hid, 1, name='value_out')
+
+        self.advantage, self.w['adv_w_out'], self.w['adv_w_b'] = \
+          linear(self.adv_hid, self.env_action_size, name='adv_out')
+
+        # Average Dueling
+        self.q = self.value + (self.advantage - 
+          tf.reduce_mean(self.advantage, reduction_indices=1, keep_dims=True))
+      else:
+        self.l4, self.w['l4_w'], self.w['l4_b'] = linear(self.l3_flat, 512, activation_fn=activation_fn, name='l4')
+        self.q, self.w['q_w'], self.w['q_b'] = linear(self.l4, self.env_action_size, name='q')
+
+      self.q_action = tf.argmax(self.q, dimension=1)
+
+      q_summary = []
+      avg_q = tf.reduce_mean(self.q, 0)
+      for idx in xrange(self.env_action_size):
+        q_summary.append(tf.histogram_summary('q/%s' % idx, avg_q[idx]))
+      self.q_summary = tf.merge_summary(q_summary, 'q_summary')
+
+    # target network
+    with tf.variable_scope('target'):
+      if self.cnn_format == 'NHWC':
+        self.target_s_t = tf.placeholder('float32', 
+            [None, self.screen_height, self.screen_width, self.history_length], name='target_s_t')
+      else:
+        self.target_s_t = tf.placeholder('float32', 
+            [None, self.history_length, self.screen_height, self.screen_width], name='target_s_t')
+
+      self.target_l1, self.t_w['l1_w'], self.t_w['l1_b'] = conv2d(self.target_s_t, 
+          32, [8, 8], [4, 4], initializer, activation_fn, self.cnn_format, name='target_l1')
+      self.target_l2, self.t_w['l2_w'], self.t_w['l2_b'] = conv2d(self.target_l1,
+          64, [4, 4], [2, 2], initializer, activation_fn, self.cnn_format, name='target_l2')
+      self.target_l3, self.t_w['l3_w'], self.t_w['l3_b'] = conv2d(self.target_l2,
+          64, [3, 3], [1, 1], initializer, activation_fn, self.cnn_format, name='target_l3')
+
+      shape = self.target_l3.get_shape().as_list()
+      self.target_l3_flat = tf.reshape(self.target_l3, [-1, reduce(lambda x, y: x * y, shape[1:])])
+
+      if self.dueling:
+        self.t_value_hid, self.t_w['l4_val_w'], self.t_w['l4_val_b'] = \
+            linear(self.target_l3_flat, 512, activation_fn=activation_fn, name='target_value_hid')
+
+        self.t_adv_hid, self.t_w['l4_adv_w'], self.t_w['l4_adv_b'] = \
+            linear(self.target_l3_flat, 512, activation_fn=activation_fn, name='target_adv_hid')
+
+        self.t_value, self.t_w['val_w_out'], self.t_w['val_w_b'] = \
+          linear(self.t_value_hid, 1, name='target_value_out')
+
+        self.t_advantage, self.t_w['adv_w_out'], self.t_w['adv_w_b'] = \
+          linear(self.t_adv_hid, self.env_action_size, name='target_adv_out')
+
+        # Average Dueling
+        self.target_q = self.t_value + (self.t_advantage - 
+          tf.reduce_mean(self.t_advantage, reduction_indices=1, keep_dims=True))
+      else:
+        self.target_l4, self.t_w['l4_w'], self.t_w['l4_b'] = \
+            linear(self.target_l3_flat, 512, activation_fn=activation_fn, name='target_l4')
+        self.target_q, self.t_w['q_w'], self.t_w['q_b'] = \
+            linear(self.target_l4, self.env_action_size, name='target_q')
+
+      self.target_q_idx = tf.placeholder('int32', [None, None], 'outputs_idx')
+      self.target_q_with_idx = tf.gather_nd(self.target_q, self.target_q_idx)
+
+    with tf.variable_scope('pred_to_target'):
+      self.t_w_input = {}
+      self.t_w_assign_op = {}
+
+      for name in self.w.keys():
+        self.t_w_input[name] = tf.placeholder('float32', self.t_w[name].get_shape().as_list(), name=name)
+        self.t_w_assign_op[name] = self.t_w[name].assign(self.t_w_input[name])
+
+    # optimizer
+    with tf.variable_scope('optimizer'):
+      self.target_q_t = tf.placeholder('float32', [None], name='target_q_t')
+      self.action = tf.placeholder('int64', [None], name='action')
+
+      action_one_hot = tf.one_hot(self.action, self.env_action_size, 1.0, 0.0, name='action_one_hot')
+      q_acted = tf.reduce_sum(self.q * action_one_hot, reduction_indices=1, name='q_acted')
+
+      self.delta = self.target_q_t - q_acted
+
+      self.global_step = tf.Variable(0, trainable=False)
+
+      self.loss = tf.reduce_mean(clipped_error(self.delta), name='loss')
+      self.learning_rate_step = tf.placeholder('int64', None, name='learning_rate_step')
+      self.learning_rate_op = tf.maximum(self.learning_rate_minimum,
+          tf.train.exponential_decay(
+              self.learning_rate,
+              self.learning_rate_step,
+              self.learning_rate_decay_step,
+              self.learning_rate_decay,
+              staircase=True))
+      self.optim = tf.train.RMSPropOptimizer(
+          self.learning_rate_op, momentum=0.95, epsilon=0.01).minimize(self.loss)
+
+    with tf.variable_scope('summary'):
+      scalar_summary_tags = ['average.reward', 'average.loss', 'average.q', \
+          'episode.max reward', 'episode.min reward', 'episode.avg reward', 'episode.num of game', 'training.learning_rate']
+
+      self.summary_placeholders = {}
+      self.summary_ops = {}
+
+      for tag in scalar_summary_tags:
+        self.summary_placeholders[tag] = tf.placeholder('float32', None, name=tag.replace(' ', '_'))
+        self.summary_ops[tag]  = tf.scalar_summary("%s-%s/%s" % (self.env_name, self.env_type, tag), self.summary_placeholders[tag])
+
+      histogram_summary_tags = ['episode.rewards', 'episode.actions']
+
+      for tag in histogram_summary_tags:
+        self.summary_placeholders[tag] = tf.placeholder('float32', None, name=tag.replace(' ', '_'))
+        self.summary_ops[tag]  = tf.histogram_summary(tag, self.summary_placeholders[tag])
+
+      self.writer = tf.train.SummaryWriter('./logs/%s' % self.model_dir, self.sess.graph)
+
+    tf.initialize_all_variables().run()
+
+    self._saver = tf.train.Saver(self.w.values() + [self.step_op], max_to_keep=30)
+
+    self.load_model()
+    self.update_target_q_network()
+
+  def update_target_q_network(self):
+    for name in self.w.keys():
+      self.t_w_assign_op[name].eval({self.t_w_input[name]: self.w[name].eval()})
 
 
-    def buildNetwork(self, name, trainable, numActions):
-        
-        print("Building network for %s trainable=%s" % (name, trainable))
+  def play(self, screen):
+    test_ep = 0.05
+    screen = cv2.resize(cv2.cvtColor(screen, cv2.COLOR_RGB2GRAY)/255., (84,84))
+    # test_history = History(self.config)
 
-        # First layer takes a screen, and shrinks by 2x
-        x = tf.placeholder(tf.uint8, shape=[None, 84, 84, 4], name="screens")
-        print(x)
+    if self.checkStart:
+      for _ in range(self.history_length):
+        self.test_history.add(screen)
+      self.checkStart = False
+    else:
+      self.test_history.add(screen)
 
-        x_normalized = tf.to_float(x) / 255.0
-        print(x_normalized)
-
-        # Second layer convolves 32 8x8 filters with stride 4 with relu
-        with tf.variable_scope("cnn1_" + name):
-            W_conv1, b_conv1 = self.makeLayerVariables([8, 8, 4, 32], trainable, "conv1")
-
-            h_conv1 = tf.nn.relu(tf.nn.conv2d(x_normalized, W_conv1, strides=[1, 4, 4, 1], padding='VALID') + b_conv1, name="h_conv1")
-            print(h_conv1)
-
-        # Third layer convolves 64 4x4 filters with stride 2 with relu
-        with tf.variable_scope("cnn2_" + name):
-            W_conv2, b_conv2 = self.makeLayerVariables([4, 4, 32, 64], trainable, "conv2")
-
-            h_conv2 = tf.nn.relu(tf.nn.conv2d(h_conv1, W_conv2, strides=[1, 2, 2, 1], padding='VALID') + b_conv2, name="h_conv2")
-            print(h_conv2)
-
-        # Fourth layer convolves 64 3x3 filters with stride 1 with relu
-        with tf.variable_scope("cnn3_" + name):
-            W_conv3, b_conv3 = self.makeLayerVariables([3, 3, 64, 64], trainable, "conv3")
-
-            h_conv3 = tf.nn.relu(tf.nn.conv2d(h_conv2, W_conv3, strides=[1, 1, 1, 1], padding='VALID') + b_conv3, name="h_conv3")
-            print(h_conv3)
-
-        h_conv3_flat = tf.reshape(h_conv3, [-1, 7 * 7 * 64], name="h_conv3_flat")
-        print(h_conv3_flat)
-
-        # Fifth layer is fully connected with 512 relu units
-        with tf.variable_scope("fc1_" + name):
-            W_fc1, b_fc1 = self.makeLayerVariables([7 * 7 * 64, 512], trainable, "fc1")
-
-            h_fc1 = tf.nn.relu(tf.matmul(h_conv3_flat, W_fc1) + b_fc1, name="h_fc1")
-            print(h_fc1)
-
-        # Sixth (Output) layer is fully connected linear layer
-        with tf.variable_scope("fc2_" + name):
-            W_fc2, b_fc2 = self.makeLayerVariables([512, numActions], trainable, "fc2")
-
-            y = tf.matmul(h_fc1, W_fc2) + b_fc2
-            print(y)
-            
-        return x, y
-
-    def makeLayerVariables(self, shape, trainable, name_suffix):
-        if self.normalizeWeights:
-            # This is my best guess at what DeepMind does via torch's Linear.lua and SpatialConvolution.lua (see reset methods).
-            # np.prod(shape[0:-1]) is attempting to get the total inputs to each node
-            stdv = 1.0 / math.sqrt(np.prod(shape[0:-1]))
-            weights = tf.Variable(tf.random_uniform(shape, minval=-stdv, maxval=stdv), trainable=trainable, name='W_' + name_suffix)
-            biases  = tf.Variable(tf.random_uniform([shape[-1]], minval=-stdv, maxval=stdv), trainable=trainable, name='W_' + name_suffix)
-        else:
-            weights = tf.Variable(tf.truncated_normal(shape, stddev=0.01), trainable=trainable, name='W_' + name_suffix)
-            biases  = tf.Variable(tf.fill([shape[-1]], 0.1), trainable=trainable, name='W_' + name_suffix)
-        return weights, biases
-        
+    # 1. predict
+    action = self.predict(self.test_history.get(), test_ep)
+    return self.min_action_set[action]
 
